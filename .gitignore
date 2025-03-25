@@ -103,6 +103,8 @@ ENV/
 # Data directories
 data/raw_pictures/
 data/cropped_pictures/
+data/linkage_data/
+data/processed/
 
 # IDE
 .idea/
