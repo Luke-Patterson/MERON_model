@@ -99,3 +99,13 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+# Data directories
+data/raw_pictures/
+data/cropped_pictures/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
