@@ -1,0 +1,13 @@
+{
+    "RANDOM_STATE": 42,
+    "TEST_SIZE": 0.2,
+    "VAL_SIZE": 0.2,
+    "BATCH_SIZE": 32,
+    "NUM_EPOCHS": 150,
+    "LEARNING_RATE": 5e-06,
+    "WEIGHT_DECAY": 0.5,
+    "PATIENCE": 20,
+    "INPUT_SIZE": 224,
+    "NUM_CLASSES": 2,
+    "DECISION_THRESHOLD": 0.3
+}

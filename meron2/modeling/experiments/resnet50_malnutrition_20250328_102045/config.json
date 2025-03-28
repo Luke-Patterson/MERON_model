@@ -1,0 +1,14 @@
+{
+    "RANDOM_STATE": 42,
+    "TEST_SIZE": 0.2,
+    "BATCH_SIZE": 32,
+    "NUM_EPOCHS": 100,
+    "LEARNING_RATE": 0.0001,
+    "WEIGHT_DECAY": 1e-05,
+    "IMAGE_SIZE": 224,
+    "PATIENCE": 10,
+    "CLASS_WEIGHTS": [
+        1.0,
+        2.0
+    ]
+}

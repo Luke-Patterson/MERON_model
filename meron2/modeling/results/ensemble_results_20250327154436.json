@@ -1,0 +1,125 @@
+{
+    "config": {
+        "RANDOM_STATE": 42,
+        "TEST_SIZE": 0.2,
+        "BATCH_SIZE": 32,
+        "NUM_EPOCHS": 50,
+        "LEARNING_RATE": 0.001,
+        "WEIGHT_DECAY": 1e-05,
+        "L1_LAMBDA": 1e-05,
+        "FEATURE_SELECTION_K": 1000,
+        "PCA_COMPONENTS": 300,
+        "N_SPLITS": 5,
+        "PATIENCE": 10,
+        "CLASS_WEIGHTS": [
+            1.0,
+            3.0,
+            5.0
+        ],
+        "USE_SMOTE": true,
+        "SMOTE_RATIO": 0.8,
+        "N_TRIALS": 20,
+        "N_MODELS": 5
+    },
+    "models": [
+        {
+            "fold": 1,
+            "hyperparameters": {
+                "hidden_size1": 228,
+                "hidden_size2": 113,
+                "dropout_rate": 0.21690259043902496,
+                "learning_rate": 0.0015927224506070918,
+                "weight_decay": 5.7773250465583594e-05,
+                "l1_lambda": 2.8829799510948533e-06
+            },
+            "validation_f1": 0.9395290252698864,
+            "model_file": "meron2\\modeling\\models\\ensemble_model_fold_1.pth"
+        },
+        {
+            "fold": 2,
+            "hyperparameters": {
+                "hidden_size1": 459,
+                "hidden_size2": 231,
+                "dropout_rate": 0.3672038192415923,
+                "learning_rate": 0.003282254456484114,
+                "weight_decay": 8.386228728786348e-05,
+                "l1_lambda": 9.291346149285574e-06
+            },
+            "validation_f1": 0.9370841093368322,
+            "model_file": "meron2\\modeling\\models\\ensemble_model_fold_2.pth"
+        },
+        {
+            "fold": 3,
+            "hyperparameters": {
+                "hidden_size1": 247,
+                "hidden_size2": 115,
+                "dropout_rate": 0.3191278741436192,
+                "learning_rate": 0.004246000534860408,
+                "weight_decay": 6.598864341782369e-05,
+                "l1_lambda": 5.125590671009969e-06
+            },
+            "validation_f1": 0.9350664166635282,
+            "model_file": "meron2\\modeling\\models\\ensemble_model_fold_3.pth"
+        },
+        {
+            "fold": 4,
+            "hyperparameters": {
+                "hidden_size1": 468,
+                "hidden_size2": 160,
+                "dropout_rate": 0.35220119002394684,
+                "learning_rate": 0.002719772297217785,
+                "weight_decay": 1.4645091906383749e-06,
+                "l1_lambda": 1.4555279525258428e-06
+            },
+            "validation_f1": 0.9415140687524669,
+            "model_file": "meron2\\modeling\\models\\ensemble_model_fold_4.pth"
+        },
+        {
+            "fold": 5,
+            "hyperparameters": {
+                "hidden_size1": 276,
+                "hidden_size2": 103,
+                "dropout_rate": 0.2393015951619286,
+                "learning_rate": 0.002112737168588257,
+                "weight_decay": 7.263174407413907e-05,
+                "l1_lambda": 2.196968939125493e-06
+            },
+            "validation_f1": 0.9461496443501841,
+            "model_file": "meron2\\modeling\\models\\ensemble_model_fold_5.pth"
+        }
+    ],
+    "predictions": [],
+    "fold_scores": [
+        0.9395290252698864,
+        0.9370841093368322,
+        0.9350664166635282,
+        0.9415140687524669,
+        0.9461496443501841
+    ],
+    "test_metrics": {
+        "accuracy": 0.7378531073446327,
+        "f1_macro": 0.3467496487903647,
+        "f1_per_class": [
+            0.85177733065057,
+            0.14847161572052403,
+            0.04
+        ],
+        "confusion_matrix": [
+            [
+                635,
+                72,
+                13
+            ],
+            [
+                112,
+                17,
+                3
+            ],
+            [
+                24,
+                8,
+                1
+            ]
+        ],
+        "predictions_distribution": {
+            

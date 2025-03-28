@@ -106,6 +106,9 @@ data/cropped_pictures/
 data/linkage_data/
 data/processed/
 
+# models
+meron2/modeling/models/*
+
 # IDE
 .idea/
 .vscode/

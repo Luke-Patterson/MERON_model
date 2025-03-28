@@ -1,0 +1,13 @@
+
+Input Image 224x224x3
+Conv 1
+112x112
+Conv 2
+56x56
+Conv 3
+28x28
+Avg Pooling
+Conv 4
+14x14
+Fully Connected layer
+Output

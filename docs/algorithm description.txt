@@ -1,0 +1,44 @@
+
+Input: Child image x from the dataset and Residual Block, lower vanishing gradient using ResNet as H(x)
+Output: Prediction of Malnutrition kids by image segmentation of hair color Chin structure -> optimal solution.
+1
+Begin
+For each X input do
+Convo Layer = Face image (); // 3X3 image split into different layer
+2
+3
+Build a Residual Block (ResNet-50)
+4
+For each Normalization process do
+5
+6
+7
+8
+9
+10
+11
+12
+Padding 3x3 matrix image
+image data for each residual block is to be loaded, kids Face image Embedded normalize
+H(x)=F(x)+W(x)×X; // Store Face image's weight skip connection
+Relu→F(x)+X; // initial activation from stride 1
+Yk= H(Xk)+F(Xk,Wk );
+Else
+for kernel size as 1 then reshaping of Face image as 64 convoy layers as 256 residue blocks do
+imagek = Xn Yn;
+Split the data to Train and Test based on 40:10 (Train set, Test set);
+Reshaping Face images embed to the output of 64-Softmax; move Next Residual layer;
+Update the Reshape of the Face image to all residual blocks;
+Evaluate the final block outcome move to Resnet;
+End For:
+Move the next layer as 1000 class Face image input;
+H(X) = Softmax(W1):// weight change stride change transfer to final layer else
+Apply Activation=Sigmoid (H(x))
+1 1+e-n'
+// Reduce overfitting
+Utilize (kernel as 7*7 and output as 2048) in this step;
+Up sampling done;
+for Prediction do
+Estimate L2 Regularization;
+Estimate Loss Function to obtain Performance of ResNet 50;//Obtained the final result
+End
