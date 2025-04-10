@@ -1,0 +1,32 @@
+Facial Feature Analysis Report
+==============================
+
+Basic Measurements:
+--------------------
+cheek_symmetry: 1.7550
+temple_width: 0.3859
+face_ratio: 0.7165
+eye_symmetry: 1.0421
+mouth_ratio: 0.5163
+
+Area Measurements:
+--------------------
+face_area: 5.0891
+left_cheek_area: 1.9034
+right_cheek_area: 1.9104
+left_eye_area: 0.0773
+right_eye_area: 0.0702
+
+Angular Measurements:
+--------------------
+jaw_angle: 1.2106 radians
+forehead_angle: 1.0982 radians
+left_jaw_angle: 2.4308 radians
+right_jaw_angle: 2.4448 radians
+
+Texture Features:
+--------------------
+left_cheek_texture_mean: 252.0000
+right_cheek_texture_mean: 252.0000
+left_eye_texture_mean: 252.0000
+right_eye_texture_mean: 252.0000

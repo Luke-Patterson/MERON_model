@@ -63,7 +63,7 @@ class MalnutritionDataset(Dataset):
         return self.features[idx], self.labels[idx]
 
 class MalnutritionNN(nn.Module):
-    def __init__(self, input_size, num_classes):
+    def __init__(self, input_size, num_classes=2):
         super(MalnutritionNN, self).__init__()
         
         # Moderate architecture with L1 regularization
@@ -111,14 +111,11 @@ class MalnutritionNN(nn.Module):
 
 def create_malnutrition_class(row):
     """
-    Create a three-class target variable:
+    Create a binary target variable:
     - 0: Normal
-    - 1: MAM (Moderate Acute Malnutrition)
-    - 2: SAM (Severe Acute Malnutrition)
+    - 1: Malnourished (either MAM or SAM)
     """
-    if row['sam'] == 1:
-        return 2
-    elif row['mam'] == 1:
+    if row['sam'] == 1 or row['mam'] == 1:
         return 1
     else:
         return 0
@@ -141,7 +138,7 @@ def load_and_preprocess_data():
     # Get the class distribution
     class_distribution = df['malnutrition_class'].value_counts().sort_index()
     print("\nClass distribution:")
-    for class_name, count in zip(['Normal', 'MAM', 'SAM'], class_distribution):
+    for class_name, count in zip(['Normal', 'Malnourished'], class_distribution):
         print(f"{class_name}: {count} samples ({count/len(df)*100:.1f}%)")
     
     # Select features (ResNet50 features)
@@ -309,7 +306,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         current_lr = optimizer.param_groups[0]['lr']
         
         # Print predictions distribution and per-class metrics
-        val_pred_counts = np.bincount(val_preds, minlength=3)
+        val_pred_counts = np.bincount(val_preds, minlength=2)
         val_pred_percentages = val_pred_counts / len(val_preds) * 100
         
         # Per-class F1 scores
@@ -323,10 +320,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
               f"Time: {epoch_duration:.2f}s")
         
         print(f"Prediction distribution: Normal: {val_pred_percentages[0]:.1f}%, "
-              f"MAM: {val_pred_percentages[1]:.1f}%, SAM: {val_pred_percentages[2]:.1f}%")
+              f"Malnourished: {val_pred_percentages[1]:.1f}%")
         
         print(f"F1 per class: Normal: {val_f1_per_class[0]:.4f}, "
-              f"MAM: {val_f1_per_class[1]:.4f}, SAM: {val_f1_per_class[2]:.4f}")
+              f"Malnourished: {val_f1_per_class[1]:.4f}")
         
         # Early stopping based on F1 score
         if val_f1 > best_val_f1:
@@ -405,17 +402,17 @@ def evaluate_model(model, test_loader, device, l1_weight=0.0):
     
     # Classification report
     class_report = classification_report(all_labels, all_preds, 
-                                      target_names=['Normal', 'MAM', 'SAM'], 
+                                      target_names=['Normal', 'Malnourished'], 
                                       output_dict=True, zero_division=0)
     
     # Confusion matrix
     conf_matrix = confusion_matrix(all_labels, all_preds)
     
     # Prediction distribution
-    pred_counts = np.bincount(all_preds, minlength=3)
+    pred_counts = np.bincount(all_preds, minlength=2)
     pred_percentages = pred_counts / len(all_preds) * 100
     print(f"Test prediction distribution: Normal: {pred_percentages[0]:.1f}%, "
-          f"MAM: {pred_percentages[1]:.1f}%, SAM: {pred_percentages[2]:.1f}%")
+          f"Malnourished: {pred_percentages[1]:.1f}%")
     
     # ROC AUC score (one-vs-rest)
     try:
@@ -447,7 +444,7 @@ def evaluate_model(model, test_loader, device, l1_weight=0.0):
     print(f"Balanced Accuracy: {balanced_accuracy:.4f}")
     print(f"Macro F1-Score: {f1_macro:.4f}")
     print("\nPer-Class Metrics:")
-    for i, class_name in enumerate(['Normal', 'MAM', 'SAM']):
+    for i, class_name in enumerate(['Normal', 'Malnourished']):
         print(f"{class_name}: Accuracy={per_class_accuracy[i]:.4f}, F1={f1_per_class[i]:.4f}, "
               f"Precision={precision_per_class[i]:.4f}, Recall={recall_per_class[i]:.4f}")
     
@@ -497,8 +494,8 @@ def visualize_results(results, timestamp):
     plt.figure(figsize=(10, 8))
     conf_matrix = np.array(results['confusion_matrix'])
     sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['Normal', 'MAM', 'SAM'],
-                yticklabels=['Normal', 'MAM', 'SAM'])
+                xticklabels=['Normal', 'Malnourished'],
+                yticklabels=['Normal', 'Malnourished'])
     plt.xlabel('Predicted')
     plt.ylabel('Actual')
     plt.title('Confusion Matrix')
@@ -512,7 +509,7 @@ def visualize_results(results, timestamp):
         'Recall': results['recall_per_class'],
         'F1 Score': results['f1_per_class'],
         'Accuracy': results['per_class_accuracy']
-    }, index=['Normal', 'MAM', 'SAM'])
+    }, index=['Normal', 'Malnourished'])
     metrics_df.plot(kind='bar', figsize=(12, 6))
     plt.title('Performance Metrics per Class')
     plt.ylabel('Score')
@@ -572,7 +569,7 @@ def main():
     # Create model
     print("\nInitializing model...")
     input_size = X_train.shape[1]  # PCA reduced features
-    num_classes = len(class_distribution)
+    num_classes = 2  # Binary classification
     model = MalnutritionNN(input_size, num_classes).to(device)
     
     # Calculate total parameters
@@ -581,8 +578,8 @@ def main():
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
     
-    # Higher class weights - more emphasis on minority classes
-    class_weights = torch.FloatTensor([1.0, 3.0, 5.0]).to(device)
+    # Higher class weights - more emphasis on minority class
+    class_weights = torch.FloatTensor([1.0, 3.0]).to(device)  # Changed to 2 weights
     print(f"\nStrong class weights: {class_weights}")
     
     # Create loss function
@@ -611,7 +608,7 @@ def main():
     # Print optimization objective
     print("\nOptimization approach: Dimensionality reduction + Aggressive class balancing")
     print(f"Using PCA to reduce to {PCA_COMPONENTS} dimensions")
-    print(f"Using stronger class weights [1.0, 3.0, 5.0] and sampler alpha={BALANCE_ALPHA}")
+    print(f"Using stronger class weights [1.0, 3.0] and sampler alpha={BALANCE_ALPHA}")
     print(f"Using L1 regularization with weight {l1_weight}")
     
     # Train model with scheduler and L1 regularization

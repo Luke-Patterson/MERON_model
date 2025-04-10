@@ -108,9 +108,11 @@ data/processed/
 
 # models
 meron2/modeling/models/*
+*.pth
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+.cursor/

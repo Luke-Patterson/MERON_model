@@ -1,10 +1,9 @@
 """
 XGBoost Model for Malnutrition Classification
 
-This script trains an XGBoost model to classify children into three classes:
+This script trains an XGBoost model to classify children into two classes:
 - Normal: No malnutrition
-- MAM: Moderate Acute Malnutrition
-- SAM: Severe Acute Malnutrition
+- Malnourished: Either MAM or SAM
 
 The model uses ResNet50 features extracted from cropped child images.
 """
@@ -37,14 +36,11 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 
 def create_malnutrition_class(row):
     """
-    Create a three-class target variable:
+    Create a binary target variable:
     - 0: Normal
-    - 1: MAM (Moderate Acute Malnutrition)
-    - 2: SAM (Severe Acute Malnutrition)
+    - 1: Malnourished (either MAM or SAM)
     """
-    if row['sam'] == 1:
-        return 2
-    elif row['mam'] == 1:
+    if row['sam'] == 1 or row['mam'] == 1:
         return 1
     else:
         return 0
@@ -100,10 +96,9 @@ def train_model(X_train, y_train, class_distribution):
     
     # Set up the XGBoost classifier with class weights
     model = xgb.XGBClassifier(
-        objective='multi:softprob',
-        num_class=3,
+        objective='binary:logistic',  # Changed to binary classification
         random_state=RANDOM_STATE,
-        eval_metric='mlogloss'
+        eval_metric='logloss'  # Changed to logloss for binary classification
     )
     
     # Apply class weights to the samples
@@ -123,9 +118,9 @@ def train_model(X_train, y_train, class_distribution):
         estimator=model,
         param_grid=param_grid,
         cv=3,
-        scoring='f1_macro',  # Use macro-averaged F1 score for imbalanced classes
+        scoring='f1',  # Changed to binary F1 score
         n_jobs=-1,
-        verbose=3  # Increased verbosity to show more detailed progress
+        verbose=3
     )
     
     # Fit the model
@@ -162,7 +157,7 @@ def evaluate_model(model, X_test, y_test):
     recall_per_class = recall_score(y_test, y_pred, average=None)
     
     # Classification report
-    class_report = classification_report(y_test, y_pred, target_names=['Normal', 'MAM', 'SAM'], output_dict=True)
+    class_report = classification_report(y_test, y_pred, target_names=['Normal', 'Malnourished'], output_dict=True)
     
     # Confusion matrix
     conf_matrix = confusion_matrix(y_test, y_pred)
@@ -236,8 +231,8 @@ def visualize_results(results, timestamp):
     plt.figure(figsize=(10, 8))
     conf_matrix = np.array(results['confusion_matrix'])
     sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['Normal', 'MAM', 'SAM'],
-                yticklabels=['Normal', 'MAM', 'SAM'])
+                xticklabels=['Normal', 'Malnourished'],
+                yticklabels=['Normal', 'Malnourished'])
     plt.xlabel('Predicted')
     plt.ylabel('Actual')
     plt.title('Confusion Matrix')
@@ -250,7 +245,7 @@ def visualize_results(results, timestamp):
         'Precision': results['precision_per_class'],
         'Recall': results['recall_per_class'],
         'F1 Score': results['f1_per_class']
-    }, index=['Normal', 'MAM', 'SAM'])
+    }, index=['Normal', 'Malnourished'])
     metrics_df.plot(kind='bar', figsize=(12, 6))
     plt.title('Performance Metrics per Class')
     plt.ylabel('Score')
@@ -283,7 +278,7 @@ def main():
     print("=" * 50)
     print(f"XGBoost model training and evaluation completed!")
     print(f"Accuracy: {results['accuracy']:.4f}")
-    print(f"F1 Score (Macro): {results['f1_macro']:.4f}")
+    print(f"F1 Score: {results['f1_macro']:.4f}")
     print(f"Model saved to: {model_path}")
     print(f"Results saved to: {results_path}")
 

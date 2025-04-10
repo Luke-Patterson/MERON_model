@@ -58,36 +58,31 @@ class MalnutritionDataset(Dataset):
         return self.features[idx], self.labels[idx]
 
 class MalnutritionNN(nn.Module):
-    def __init__(self, input_size, hidden_sizes, dropout_rate=0.4):
+    def __init__(self, input_size, hidden_sizes=[512, 256, 128], dropout_rate=0.3):
         super(MalnutritionNN, self).__init__()
-        self.input_size = input_size
+        self.layers = nn.ModuleList()
         
-        # Create list of sequential layers
-        layers = []
-        prev_size = input_size
+        # Input layer
+        self.layers.append(nn.Linear(input_size, hidden_sizes[0]))
+        self.layers.append(nn.ReLU())
+        self.layers.append(nn.BatchNorm1d(hidden_sizes[0]))
+        self.layers.append(nn.Dropout(dropout_rate))
         
-        for i, hidden_size in enumerate(hidden_sizes):
-            # Linear layer
-            linear = nn.Linear(prev_size, hidden_size)
-            
-            # Initialize weights using Kaiming initialization
-            nn.init.kaiming_normal_(linear.weight, nonlinearity='relu')
-            nn.init.constant_(linear.bias, 0)
-            
-            layers.append(linear)
-            
-            # Add batch norm, activation, and dropout after each linear layer except the last
-            if i < len(hidden_sizes) - 1:
-                layers.append(nn.BatchNorm1d(hidden_size))
-                layers.append(nn.ReLU())
-                layers.append(nn.Dropout(dropout_rate))
-            
-            prev_size = hidden_size
+        # Hidden layers
+        for i in range(len(hidden_sizes)-1):
+            self.layers.append(nn.Linear(hidden_sizes[i], hidden_sizes[i+1]))
+            self.layers.append(nn.ReLU())
+            self.layers.append(nn.BatchNorm1d(hidden_sizes[i+1]))
+            self.layers.append(nn.Dropout(dropout_rate))
         
-        self.model = nn.Sequential(*layers)
-        
+        # Output layer for binary classification
+        self.layers.append(nn.Linear(hidden_sizes[-1], 1))
+        self.layers.append(nn.Sigmoid())  # Sigmoid for binary classification
+
     def forward(self, x):
-        return self.model(x)
+        for layer in self.layers:
+            x = layer(x)
+        return x
     
     def l1_regularization(self):
         l1_reg = torch.tensor(0., requires_grad=True)
@@ -133,14 +128,11 @@ def load_data(resnet_features_path, labels_path):
 
 def create_malnutrition_class(row):
     """
-    Create a three-class target variable:
+    Create a binary target variable:
     - 0: Normal
-    - 1: MAM (Moderate Acute Malnutrition)
-    - 2: SAM (Severe Acute Malnutrition)
+    - 1: Malnourished (either MAM or SAM)
     """
-    if row['sam'] == 1:
-        return 2
-    elif row['mam'] == 1:
+    if row['sam'] == 1 or row['mam'] == 1:
         return 1
     else:
         return 0
@@ -235,7 +227,7 @@ def objective(trial, X_train, y_train, X_val, y_val, input_size, config):
     # Create model with suggested hyperparameters
     model = MalnutritionNN(
         input_size=input_size,
-        hidden_sizes=[hidden_size1, hidden_size2, 3],
+        hidden_sizes=[hidden_size1, hidden_size2, 1],
         dropout_rate=dropout_rate
     ).to(DEVICE)
     
@@ -250,7 +242,7 @@ def objective(trial, X_train, y_train, X_val, y_val, input_size, config):
     
     # Define loss function with class weights
     class_weights = torch.FloatTensor(config['CLASS_WEIGHTS']).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.BCELoss(weight=class_weights)
     
     # Define optimizer
     optimizer = optim.Adam(
@@ -289,8 +281,7 @@ def objective(trial, X_train, y_train, X_val, y_val, input_size, config):
         for features, labels in val_loader:
             features, labels = features.to(DEVICE), labels.to(DEVICE)
             outputs = model(features)
-            _, predicted = torch.max(outputs.data, 1)
-            val_preds.extend(predicted.cpu().numpy())
+            val_preds.extend(outputs.cpu().numpy().flatten())
             val_labels.extend(labels.cpu().numpy())
         
         # Calculate F1 score (macro)
@@ -303,7 +294,7 @@ def train_and_evaluate_model(X_train, y_train, X_val, y_val, best_params, config
     # Create model with best hyperparameters
     model = MalnutritionNN(
         input_size=X_train.shape[1],
-        hidden_sizes=[best_params['hidden_size1'], best_params['hidden_size2'], 3],
+        hidden_sizes=[best_params['hidden_size1'], best_params['hidden_size2'], 1],
         dropout_rate=best_params['dropout_rate']
     ).to(DEVICE)
     
@@ -324,7 +315,7 @@ def train_and_evaluate_model(X_train, y_train, X_val, y_val, best_params, config
     
     # Define loss function with class weights
     class_weights = torch.FloatTensor(config['CLASS_WEIGHTS']).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.BCELoss(weight=class_weights)
     
     # Define optimizer
     optimizer = optim.Adam(
@@ -373,8 +364,7 @@ def train_and_evaluate_model(X_train, y_train, X_val, y_val, best_params, config
             train_loss += loss.item()
             
             # Store predictions for metrics
-            _, predicted = torch.max(outputs.data, 1)
-            train_preds.extend(predicted.cpu().numpy())
+            train_preds.extend(outputs.cpu().numpy().flatten())
             train_labels.extend(labels.cpu().numpy())
         
         # Calculate training metrics
@@ -399,8 +389,7 @@ def train_and_evaluate_model(X_train, y_train, X_val, y_val, best_params, config
                 val_loss += loss.item()
                 
                 # Store predictions for metrics
-                _, predicted = torch.max(outputs.data, 1)
-                val_preds.extend(predicted.cpu().numpy())
+                val_preds.extend(outputs.cpu().numpy().flatten())
                 val_labels.extend(labels.cpu().numpy())
         
         # Calculate validation metrics
@@ -442,11 +431,8 @@ def train_and_evaluate_model(X_train, y_train, X_val, y_val, best_params, config
         for features, labels in val_loader:
             features = features.to(DEVICE)
             outputs = model(features)
-            probs = F.softmax(outputs, dim=1)
-            _, predicted = torch.max(outputs.data, 1)
-            
-            val_preds.extend(predicted.cpu().numpy())
-            val_probs.extend(probs.cpu().numpy())
+            val_preds.extend(outputs.cpu().numpy().flatten())
+            val_probs.extend(outputs.cpu().numpy())
     
     return model, val_preds, val_probs, best_f1
 
@@ -530,7 +516,7 @@ def create_ensemble_model(X_train, y_train, X_val, y_val, X_test, y_test, config
             hidden_sizes=[
                 results['models'][fold]['hyperparameters']['hidden_size1'],
                 results['models'][fold]['hyperparameters']['hidden_size2'],
-                3
+                1
             ],
             dropout_rate=results['models'][fold]['hyperparameters']['dropout_rate']
         ).to(DEVICE)
@@ -547,18 +533,15 @@ def create_ensemble_model(X_train, y_train, X_val, y_val, X_test, y_test, config
             for features, _ in test_loader:
                 features = features.to(DEVICE)
                 outputs = model(features)
-                probs = F.softmax(outputs, dim=1)
-                _, predicted = torch.max(outputs.data, 1)
-                
-                test_preds.extend(predicted.cpu().numpy())
-                test_probs.extend(probs.cpu().numpy())
+                test_preds.extend(outputs.cpu().numpy().flatten())
+                test_probs.extend(outputs.cpu().numpy())
         
         all_test_predictions.append(test_preds)
         all_test_probabilities.append(test_probs)
     
     # Ensemble predictions (soft voting)
     ensemble_probabilities = np.mean(all_test_probabilities, axis=0)
-    ensemble_predictions = np.argmax(ensemble_probabilities, axis=1)
+    ensemble_predictions = np.round(ensemble_probabilities)
     
     # Calculate ensemble metrics
     test_acc = accuracy_score(y_test, ensemble_predictions)
@@ -598,8 +581,8 @@ def visualize_results(results):
     cm = np.array(results['test_metrics']['confusion_matrix'])
     plt.figure(figsize=(10, 8))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['Normal', 'MAM', 'SAM'],
-                yticklabels=['Normal', 'MAM', 'SAM'])
+                xticklabels=['Normal', 'Malnourished'],
+                yticklabels=['Normal', 'Malnourished'])
     plt.xlabel('Predicted')
     plt.ylabel('Actual')
     plt.title('Confusion Matrix')
@@ -611,7 +594,7 @@ def visualize_results(results):
     # F1 Scores
     plt.figure(figsize=(10, 6))
     f1_scores = results['test_metrics']['f1_per_class']
-    bars = plt.bar(['Normal', 'MAM', 'SAM'], f1_scores)
+    bars = plt.bar(['Normal', 'Malnourished'], f1_scores)
     plt.xlabel('Class')
     plt.ylabel('F1 Score')
     plt.title('F1 Score by Class')
@@ -630,8 +613,8 @@ def visualize_results(results):
     # Distribution of predictions
     plt.figure(figsize=(10, 6))
     pred_dist = results['test_metrics']['predictions_distribution']
-    plt.bar(['Normal', 'MAM', 'SAM'], 
-            [pred_dist.get(0, 0), pred_dist.get(1, 0), pred_dist.get(2, 0)])
+    plt.bar(['Normal', 'Malnourished'], 
+            [pred_dist.get(0, 0), pred_dist.get(1, 0)])
     plt.xlabel('Class')
     plt.ylabel('Count')
     plt.title('Distribution of Predictions')
@@ -737,7 +720,7 @@ def main():
     print(f"Accuracy: {results['test_metrics']['accuracy']:.4f}")
     print(f"Macro F1 Score: {results['test_metrics']['f1_macro']:.4f}")
     print("F1 Scores by Class:")
-    for i, class_name in enumerate(['Normal', 'MAM', 'SAM']):
+    for i, class_name in enumerate(['Normal', 'Malnourished']):
         print(f"  {class_name}: {results['test_metrics']['f1_per_class'][i]:.4f}")
 
 if __name__ == "__main__":
