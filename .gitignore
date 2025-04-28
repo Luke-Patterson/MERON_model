@@ -108,6 +108,7 @@ data/processed/
 
 # models
 meron2/modeling/models/*
+meron2/experimenting/*
 *.pth
 
 # IDE

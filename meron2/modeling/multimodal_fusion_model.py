@@ -3,28 +3,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from torchvision import models
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score, confusion_matrix
 from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-import seaborn as sns
-from tqdm import tqdm
-from typing import Tuple, Dict, List
+import joblib
 import logging
-from datetime import datetime
+from pathlib import Path
+from base_model import BaseModel
 import json
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score
 
 class MultimodalDataset(Dataset):
+    """PyTorch dataset for multimodal malnutrition classification."""
+    
     def __init__(self, resnet_features: np.ndarray, landmark_features: np.ndarray, labels: np.ndarray):
         self.resnet_features = torch.FloatTensor(resnet_features)
         self.landmark_features = torch.FloatTensor(landmark_features)
@@ -66,16 +59,18 @@ class FocalLoss(nn.Module):
         focal_loss = (self.alpha * (1-pt)**self.gamma * ce_loss).mean()
         return focal_loss
 
-class MultimodalFusionModel(nn.Module):
+class MultimodalFusionNN(nn.Module):
+    """Neural network architecture for multimodal fusion."""
+    
     def __init__(self, resnet_dim: int, landmark_dim: int, num_classes: int = 2):
         super().__init__()
         
         # ResNet feature processing
         self.resnet_attention = AttentionLayer(resnet_dim)
         self.resnet_fc = nn.Sequential(
-            nn.Linear(resnet_dim, 128),  # Reduced capacity
+            nn.Linear(resnet_dim, 128),
             nn.ReLU(),
-            nn.Dropout(0.5),  # Increased dropout
+            nn.Dropout(0.5),
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(0.5)
@@ -84,9 +79,9 @@ class MultimodalFusionModel(nn.Module):
         # Landmark feature processing
         self.landmark_attention = AttentionLayer(landmark_dim)
         self.landmark_fc = nn.Sequential(
-            nn.Linear(landmark_dim, 64),  # Reduced capacity
+            nn.Linear(landmark_dim, 64),
             nn.ReLU(),
-            nn.Dropout(0.5),  # Increased dropout
+            nn.Dropout(0.5),
             nn.Linear(64, 32),
             nn.ReLU(),
             nn.Dropout(0.5)
@@ -94,7 +89,7 @@ class MultimodalFusionModel(nn.Module):
         
         # Fusion layers
         self.fusion = nn.Sequential(
-            nn.Linear(64 + 32, 32),  # Reduced capacity
+            nn.Linear(64 + 32, 32),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(32, num_classes)
@@ -120,43 +115,66 @@ class MultimodalFusionModel(nn.Module):
         
         return output
 
-class MultimodalTrainer:
-    def __init__(self, 
-                 resnet_features_path: str,
-                 landmark_features_path: str,
-                 labels_path: str,
-                 output_dir: str = "model_output",
-                 batch_size: int = 32,
-                 learning_rate: float = 1e-4,
-                 num_epochs: int = 50,
-                 patience: int = 10,
-                 weight_decay: float = 1e-4):  # Added weight decay
+class MultimodalFusionModel(BaseModel):
+    """Multimodal fusion model for malnutrition classification."""
+    
+    def __init__(self, config=None):
+        """
+        Initialize the multimodal fusion model.
         
-        self.resnet_features_path = resnet_features_path
-        self.landmark_features_path = landmark_features_path
-        self.labels_path = labels_path
-        self.output_dir = output_dir
-        self.batch_size = batch_size
-        self.learning_rate = learning_rate
-        self.num_epochs = num_epochs
-        self.patience = patience
-        self.weight_decay = weight_decay
+        Args:
+            config (dict): Model configuration parameters
+        """
+        default_config = {
+            'random_state': 42,
+            'test_size': 0.2,
+            'resnet_features_path': 'data/processed/resnet50_features.csv',
+            'landmark_features_path': 'data/processed/landmarks/landmark_features.csv',
+            'labels_path': 'data/processed/malnutrition_flags.csv',
+            'batch_size': 32,
+            'learning_rate': 1e-4,
+            'num_epochs': 50,
+            'patience': 10,
+            'weight_decay': 1e-4,
+            'model_params': {
+                'resnet_dim': 2048,
+                'landmark_dim': 141,  # Updated to match actual feature dimension
+                'num_classes': 2
+            }
+        }
         
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+        # Merge default config with provided config
+        if config:
+            default_config.update(config)
+            
+        super().__init__('multimodal_fusion', default_config)
         
-        # Initialize model and device
+        # Initialize preprocessing components
+        self.resnet_scaler = StandardScaler()
+        self.landmark_scaler = StandardScaler()
+        
+        # Set device
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logger.info(f"Using device: {self.device}")
         
-    def load_data(self) -> Tuple[Dict[str, DataLoader], Dict[str, np.ndarray]]:
+    def load_data(self):
+        """
+        Load and preprocess the data.
+        
+        Returns:
+            tuple: (X_train, X_test, y_train, y_test, class_distribution)
+        """
+        logging.info("Loading data...")
+        
         # Load features and labels
-        resnet_features = pd.read_csv(self.resnet_features_path)
-        landmark_features = pd.read_csv(self.landmark_features_path)
-        labels = pd.read_csv(self.labels_path)
+        resnet_features = pd.read_csv(self.config['resnet_features_path'])
+        landmark_features = pd.read_csv(self.config['landmark_features_path'])
+        labels = pd.read_csv(self.config['labels_path'])
+        
+        # Clean photo IDs
         resnet_features['photo_id'] = resnet_features['photo_id'].str.replace('.jpg', '')
         landmark_features['photo_id'] = landmark_features['photo_id'].str.replace('.jpg', '')
         labels['photo_id'] = labels['photo_id'].str.replace('.jpg', '')
+        
         # Align data
         common_ids = set(resnet_features['photo_id']).intersection(
             set(landmark_features['photo_id']).intersection(set(labels['photo_id']))
@@ -166,37 +184,56 @@ class MultimodalTrainer:
         landmark_features = landmark_features[landmark_features['photo_id'].isin(common_ids)]
         labels = labels[labels['photo_id'].isin(common_ids)]
         
-        # Split data
+        # Prepare features and labels
         X_resnet = resnet_features.drop('photo_id', axis=1).values
         X_landmarks = landmark_features.drop('photo_id', axis=1).values
         y = labels['malnutrition'].values
         
-        # Split into train/val/test
-        X_resnet_train, X_resnet_temp, X_landmarks_train, X_landmarks_temp, y_train, y_temp = train_test_split(
-            X_resnet, X_landmarks, y, test_size=0.3, random_state=42, stratify=y
-        )
-        X_resnet_val, X_resnet_test, X_landmarks_val, X_landmarks_test, y_val, y_test = train_test_split(
-            X_resnet_temp, X_landmarks_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp
+        # Verify feature dimensions
+        if X_resnet.shape[1] != self.config['model_params']['resnet_dim']:
+            raise ValueError(f"ResNet features dimension mismatch. Expected {self.config['model_params']['resnet_dim']}, got {X_resnet.shape[1]}")
+        if X_landmarks.shape[1] != self.config['model_params']['landmark_dim']:
+            raise ValueError(f"Landmark features dimension mismatch. Expected {self.config['model_params']['landmark_dim']}, got {X_landmarks.shape[1]}")
+        
+        # Get class distribution
+        class_distribution = pd.Series(y).value_counts().sort_index()
+        logging.info(f"Class distribution:\n{class_distribution}")
+        
+        # Split data
+        X_resnet_train, X_resnet_test, X_landmarks_train, X_landmarks_test, y_train, y_test = train_test_split(
+            X_resnet, X_landmarks, y,
+            test_size=self.config['test_size'],
+            random_state=self.config['random_state'],
+            stratify=y
         )
         
         # Scale features
-        scaler_resnet = StandardScaler()
-        scaler_landmarks = StandardScaler()
+        X_resnet_train = self.resnet_scaler.fit_transform(X_resnet_train)
+        X_resnet_test = self.resnet_scaler.transform(X_resnet_test)
         
-        X_resnet_train = scaler_resnet.fit_transform(X_resnet_train)
-        X_resnet_val = scaler_resnet.transform(X_resnet_val)
-        X_resnet_test = scaler_resnet.transform(X_resnet_test)
+        X_landmarks_train = self.landmark_scaler.fit_transform(X_landmarks_train)
+        X_landmarks_test = self.landmark_scaler.transform(X_landmarks_test)
         
-        X_landmarks_train = scaler_landmarks.fit_transform(X_landmarks_train)
-        X_landmarks_val = scaler_landmarks.transform(X_landmarks_val)
-        X_landmarks_test = scaler_landmarks.transform(X_landmarks_test)
+        logging.info(f"Training set shape: ResNet {X_resnet_train.shape}, Landmarks {X_landmarks_train.shape}")
+        logging.info(f"Test set shape: ResNet {X_resnet_test.shape}, Landmarks {X_landmarks_test.shape}")
+        
+        return (X_resnet_train, X_landmarks_train), (X_resnet_test, X_landmarks_test), y_train, y_test, class_distribution
+        
+    def train(self):
+        """
+        Train the multimodal fusion model.
+        
+        Returns:
+            tuple: (X_test, y_test) for evaluation
+        """
+        # Load data
+        (X_resnet_train, X_landmarks_train), (X_resnet_test, X_landmarks_test), y_train, y_test, class_distribution = self.load_data()
         
         # Create datasets
         train_dataset = MultimodalDataset(X_resnet_train, X_landmarks_train, y_train)
-        val_dataset = MultimodalDataset(X_resnet_val, X_landmarks_val, y_val)
         test_dataset = MultimodalDataset(X_resnet_test, X_landmarks_test, y_test)
         
-        # Create weighted samplers for class imbalance
+        # Create weighted sampler for class imbalance
         class_weights = torch.FloatTensor(
             len(y_train) / (2 * np.bincount(y_train))
         )
@@ -209,37 +246,26 @@ class MultimodalTrainer:
         # Create dataloaders
         train_loader = DataLoader(
             train_dataset,
-            batch_size=self.batch_size,
+            batch_size=self.config['batch_size'],
             sampler=train_sampler
         )
-        val_loader = DataLoader(val_dataset, batch_size=self.batch_size)
-        test_loader = DataLoader(test_dataset, batch_size=self.batch_size)
-        
-        return {
-            'train': train_loader,
-            'val': val_loader,
-            'test': test_loader
-        }, {
-            'train': (X_resnet_train, X_landmarks_train, y_train),
-            'val': (X_resnet_val, X_landmarks_val, y_val),
-            'test': (X_resnet_test, X_landmarks_test, y_test)
-        }
-    
-    def train(self):
-        # Load data
-        dataloaders, data = self.load_data()
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=self.config['batch_size']
+        )
         
         # Initialize model
-        model = MultimodalFusionModel(
-            resnet_dim=data['train'][0].shape[1],
-            landmark_dim=data['train'][1].shape[1]
+        self.model = MultimodalFusionNN(
+            resnet_dim=self.config['model_params']['resnet_dim'],
+            landmark_dim=self.config['model_params']['landmark_dim'],
+            num_classes=self.config['model_params']['num_classes']
         ).to(self.device)
         
-        # Initialize optimizer with weight decay
+        # Initialize optimizer
         optimizer = torch.optim.Adam(
-            model.parameters(), 
-            lr=self.learning_rate,
-            weight_decay=self.weight_decay
+            self.model.parameters(),
+            lr=self.config['learning_rate'],
+            weight_decay=self.config['weight_decay']
         )
         
         # Use focal loss
@@ -251,14 +277,14 @@ class MultimodalTrainer:
         train_losses = []
         val_losses = []
         
-        for epoch in range(self.num_epochs):
+        for epoch in range(self.config['num_epochs']):
             # Training phase
-            model.train()
+            self.model.train()
             train_loss = 0
             train_preds = []
             train_labels = []
             
-            for batch in tqdm(dataloaders['train'], desc=f'Epoch {epoch+1}/{self.num_epochs}'):
+            for batch in train_loader:
                 optimizer.zero_grad()
                 
                 resnet_features = batch['resnet'].to(self.device)
@@ -273,7 +299,7 @@ class MultimodalTrainer:
                 landmark_features = lam * landmark_features + (1 - lam) * landmark_features[index]
                 labels_a, labels_b = labels, labels[index]
                 
-                outputs = model(resnet_features, landmark_features)
+                outputs = self.model(resnet_features, landmark_features)
                 loss = lam * criterion(outputs, labels_a) + (1 - lam) * criterion(outputs, labels_b)
                 
                 loss.backward()
@@ -283,35 +309,35 @@ class MultimodalTrainer:
                 train_preds.extend(torch.argmax(outputs, dim=1).cpu().numpy())
                 train_labels.extend(labels.cpu().numpy())
             
-            train_loss /= len(dataloaders['train'])
+            train_loss /= len(train_loader)
             train_f1 = f1_score(train_labels, train_preds)
             
             # Validation phase
-            model.eval()
+            self.model.eval()
             val_loss = 0
             val_preds = []
             val_labels = []
             
             with torch.no_grad():
-                for batch in dataloaders['val']:
+                for batch in test_loader:
                     resnet_features = batch['resnet'].to(self.device)
                     landmark_features = batch['landmarks'].to(self.device)
                     labels = batch['label'].to(self.device)
                     
-                    outputs = model(resnet_features, landmark_features)
+                    outputs = self.model(resnet_features, landmark_features)
                     loss = criterion(outputs, labels)
                     
                     val_loss += loss.item()
                     val_preds.extend(torch.argmax(outputs, dim=1).cpu().numpy())
                     val_labels.extend(labels.cpu().numpy())
             
-            val_loss /= len(dataloaders['val'])
+            val_loss /= len(test_loader)
             val_f1 = f1_score(val_labels, val_preds)
             
             # Log metrics
-            logger.info(f'Epoch {epoch+1}:')
-            logger.info(f'Train Loss: {train_loss:.4f}, Train F1: {train_f1:.4f}')
-            logger.info(f'Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}')
+            logging.info(f'Epoch {epoch+1}:')
+            logging.info(f'Train Loss: {train_loss:.4f}, Train F1: {train_f1:.4f}')
+            logging.info(f'Val Loss: {val_loss:.4f}, Val F1: {val_f1:.4f}')
             
             # Save losses for plotting
             train_losses.append(train_loss)
@@ -321,11 +347,11 @@ class MultimodalTrainer:
             if val_f1 > best_f1:
                 best_f1 = val_f1
                 patience_counter = 0
-                torch.save(model.state_dict(), os.path.join(self.output_dir, 'best_model.pth'))
+                self.save_model()
             else:
                 patience_counter += 1
-                if patience_counter >= self.patience:
-                    logger.info(f'Early stopping at epoch {epoch+1}')
+                if patience_counter >= self.config['patience']:
+                    logging.info(f'Early stopping at epoch {epoch+1}')
                     break
         
         # Plot training curves
@@ -335,80 +361,126 @@ class MultimodalTrainer:
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
-        plt.savefig(os.path.join(self.output_dir, 'training_curves.png'))
+        plt.savefig(self.model_results_dir / 'training_curves.png')
         
-        return model
-    
-    def evaluate(self, model):
-        # Load test data
-        dataloaders, data = self.load_data()
+        return (X_resnet_test, X_landmarks_test), y_test
         
-        # Evaluate on test set
-        model.eval()
-        test_preds = []
-        test_labels = []
+    def predict(self, X):
+        """
+        Make predictions.
         
+        Args:
+            X: Tuple of (resnet_features, landmark_features) to predict on
+            
+        Returns:
+            array: Predicted labels
+        """
+        if self.model is None:
+            raise ValueError("Model must be trained before prediction")
+            
+        X_resnet, X_landmarks = X
+        
+        # Scale features
+        X_resnet = self.resnet_scaler.transform(X_resnet)
+        X_landmarks = self.landmark_scaler.transform(X_landmarks)
+        
+        # Convert to tensor
+        X_resnet = torch.FloatTensor(X_resnet).to(self.device)
+        X_landmarks = torch.FloatTensor(X_landmarks).to(self.device)
+        
+        # Make predictions
+        self.model.eval()
         with torch.no_grad():
-            for batch in dataloaders['test']:
-                resnet_features = batch['resnet'].to(self.device)
-                landmark_features = batch['landmarks'].to(self.device)
-                labels = batch['label'].to(self.device)
-                
-                outputs = model(resnet_features, landmark_features)
-                test_preds.extend(torch.argmax(outputs, dim=1).cpu().numpy())
-                test_labels.extend(labels.cpu().numpy())
+            outputs = self.model(X_resnet, X_landmarks)
+            _, predicted = torch.max(outputs.data, 1)
+            
+        return predicted.cpu().numpy()
         
-        # Calculate metrics
-        f1 = f1_score(test_labels, test_preds)
-        accuracy = accuracy_score(test_labels, test_preds)
-        precision = precision_score(test_labels, test_preds)
-        recall = recall_score(test_labels, test_preds)
+    def predict_proba(self, X):
+        """
+        Make probability predictions.
         
-        # Log metrics
-        logger.info('Test Results:')
-        logger.info(f'F1 Score: {f1:.4f}')
-        logger.info(f'Accuracy: {accuracy:.4f}')
-        logger.info(f'Precision: {precision:.4f}')
-        logger.info(f'Recall: {recall:.4f}')
+        Args:
+            X: Tuple of (resnet_features, landmark_features) to predict on
+            
+        Returns:
+            array: Predicted probabilities
+        """
+        if self.model is None:
+            raise ValueError("Model must be trained before prediction")
+            
+        X_resnet, X_landmarks = X
         
-        # Plot confusion matrix
-        cm = confusion_matrix(test_labels, test_preds)
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-        plt.xlabel('Predicted')
-        plt.ylabel('True')
-        plt.savefig(os.path.join(self.output_dir, 'confusion_matrix.png'))
+        # Scale features
+        X_resnet = self.resnet_scaler.transform(X_resnet)
+        X_landmarks = self.landmark_scaler.transform(X_landmarks)
         
-        return {
-            'f1': f1,
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall
-        }
+        # Convert to tensor
+        X_resnet = torch.FloatTensor(X_resnet).to(self.device)
+        X_landmarks = torch.FloatTensor(X_landmarks).to(self.device)
+        
+        # Make predictions
+        self.model.eval()
+        with torch.no_grad():
+            outputs = self.model(X_resnet, X_landmarks)
+            probs = torch.softmax(outputs, dim=1)
+            
+        return probs.cpu().numpy()
+        
+    def save_model(self):
+        """Save the model and preprocessing components to disk."""
+        if self.model is None:
+            raise ValueError("Model must be trained before saving")
+            
+        # Save model
+        torch.save(self.model.state_dict(), self.model_dir / 'model.pt')
+        logging.info(f"Model saved to {self.model_dir / 'model.pt'}")
+        
+        # Save scalers
+        joblib.dump(self.resnet_scaler, self.model_dir / 'resnet_scaler.joblib')
+        joblib.dump(self.landmark_scaler, self.model_dir / 'landmark_scaler.joblib')
+        logging.info("Scalers saved")
+        
+    def load_model(self, model_path):
+        """
+        Load the model and preprocessing components from disk.
+        
+        Args:
+            model_path (str): Path to the model directory
+        """
+        model_path = Path(model_path)
+        
+        # Load configuration
+        with open(model_path / 'config.json', 'r') as f:
+            self.config = json.load(f)
+        
+        # Load scalers
+        self.resnet_scaler = joblib.load(model_path / 'resnet_scaler.joblib')
+        self.landmark_scaler = joblib.load(model_path / 'landmark_scaler.joblib')
+        
+        # Create and load model
+        self.model = MultimodalFusionNN(
+            resnet_dim=self.config['model_params']['resnet_dim'],
+            landmark_dim=self.config['model_params']['landmark_dim'],
+            num_classes=self.config['model_params']['num_classes']
+        ).to(self.device)
+        self.model.load_state_dict(torch.load(model_path / 'model.pt'))
+        
+        logging.info(f"Model and components loaded from {model_path}")
 
 def main():
-    # Initialize trainer
-    trainer = MultimodalTrainer(
-        resnet_features_path='data/processed/resnet50_features.csv',
-        landmark_features_path='data/processed/landmarks/landmark_features.csv',
-        labels_path='data/processed/malnutrition_flags.csv',
-        output_dir='meron2/modeling/experiments/multimodal_fusion',
-        batch_size=32,
-        learning_rate=1e-4,
-        num_epochs=50,
-        patience=10,
-        weight_decay=1e-4
-    )
+    """Main function to run the model training and evaluation pipeline."""
+    # Initialize model
+    model = MultimodalFusionModel()
     
     # Train model
-    model = trainer.train()
+    X_test, y_test = model.train()
     
     # Evaluate model
-    results = trainer.evaluate(model)
+    results = model.evaluate(X_test, y_test)
     
-    # Save results
-    with open(os.path.join(trainer.output_dir, 'results.json'), 'w') as f:
-        json.dump(results, f, indent=4)
-
-if __name__ == '__main__':
+    # Visualize results
+    model.visualize_results(results)
+    
+if __name__ == "__main__":
     main() 

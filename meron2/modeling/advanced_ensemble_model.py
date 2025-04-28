@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import pandas as pd
 import torch
@@ -5,48 +6,26 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from sklearn.model_selection import StratifiedKFold, train_test_split
-from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
-from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import f1_score
 from imblearn.over_sampling import SMOTE
 import matplotlib.pyplot as plt
 import seaborn as sns
 import json
-import os
-import time
+import logging
+from pathlib import Path
+from base_model import BaseModel
+import joblib
+from datetime import datetime
 import optuna
 from collections import Counter
 import torch.nn.functional as F
-import numpy as np
-import joblib
-from datetime import datetime
-
-# Configuration
-CONFIG = {
-    'RANDOM_STATE': 42,
-    'TEST_SIZE': 0.2,
-    'BATCH_SIZE': 32,
-    'NUM_EPOCHS': 50,
-    'LEARNING_RATE': 0.001,
-    'WEIGHT_DECAY': 1e-5,
-    'L1_LAMBDA': 1e-5,
-    'FEATURE_SELECTION_K': 1000,  # Initial feature selection
-    'PCA_COMPONENTS': 300,        # After feature selection
-    'N_SPLITS': 5,                # Number of cross-validation folds
-    'PATIENCE': 10,               # Early stopping patience
-    'CLASS_WEIGHTS': [1.0, 3.0, 5.0],
-    'USE_SMOTE': True,
-    'SMOTE_RATIO': 0.8,           # 0.5 = halfway between original and balanced
-    'N_TRIALS': 20,               # Number of Bayesian optimization trials
-    'N_MODELS': 5,                # Number of models in ensemble
-}
-
-# Device configuration
-DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {DEVICE}")
 
 class MalnutritionDataset(Dataset):
+    """PyTorch dataset for malnutrition classification."""
+    
     def __init__(self, features, labels):
         self.features = torch.FloatTensor(features)
         self.labels = torch.LongTensor(labels)
@@ -58,6 +37,8 @@ class MalnutritionDataset(Dataset):
         return self.features[idx], self.labels[idx]
 
 class MalnutritionNN(nn.Module):
+    """Neural network architecture for malnutrition classification."""
+    
     def __init__(self, input_size, hidden_sizes=[512, 256, 128], dropout_rate=0.3):
         super(MalnutritionNN, self).__init__()
         self.layers = nn.ModuleList()
@@ -91,637 +72,489 @@ class MalnutritionNN(nn.Module):
                 l1_reg = l1_reg + torch.norm(param, 1)
         return l1_reg
 
-def load_data(resnet_features_path, labels_path):
-    """
-    Load and preprocess the data from CSV files
-    """
-    print(f"Loading features from: {resnet_features_path}")
+class AdvancedEnsembleModel(BaseModel):
+    """Advanced ensemble model for malnutrition classification."""
     
-    # Load features from CSV
-    df = pd.read_csv(resnet_features_path)
-    print(f"Loaded data with {len(df)} rows")
-    
-    # Check if we need to create the target variable
-    if 'malnutrition_class' not in df.columns:
-        print("Creating malnutrition class from 'mam' and 'sam' flags...")
-        # Create the three-class target variable as in neural_network_model_20250327.py
-        df['malnutrition_class'] = df.apply(create_malnutrition_class, axis=1)
-    
-    # Select features (ResNet50 features start from column 1 and end at column 2048)
-    feature_cols = list(range(1, 2049))
-    resnet_features = df.iloc[:, feature_cols].values
-    
-    # Select target
-    y = df['malnutrition_class'].values
-    
-    # Print class distribution
-    class_counts = np.bincount(y)
-    print("\nClass distribution:")
-    for class_idx, count in enumerate(['Normal', 'MAM', 'SAM']):
-        if class_idx < len(class_counts):
-            print(f"{count}: {class_counts[class_idx]} samples ({class_counts[class_idx]/len(y)*100:.1f}%)")
-    
-    print(f"Data loaded: {resnet_features.shape[0]} samples with {resnet_features.shape[1]} features")
-    print(f"Class distribution: {Counter(y)}")
-    
-    return resnet_features, y
-
-def create_malnutrition_class(row):
-    """
-    Create a binary target variable:
-    - 0: Normal
-    - 1: Malnourished (either MAM or SAM)
-    """
-    if row['sam'] == 1 or row['mam'] == 1:
-        return 1
-    else:
-        return 0
-
-def preprocess_features(features, labels, config, fit_preprocessing=True, preprocessing=None):
-    """Preprocess features with feature selection and PCA"""
-    if fit_preprocessing:
-        # Feature selection using ANOVA F-value
-        selector = SelectKBest(f_classif, k=config['FEATURE_SELECTION_K'])
-        features_selected = selector.fit_transform(features, labels)
+    def __init__(self, config=None):
+        """
+        Initialize the advanced ensemble model.
         
-        # Standardize features
-        scaler = StandardScaler()
-        features_scaled = scaler.fit_transform(features_selected)
-        
-        # Apply PCA for dimensionality reduction
-        pca = PCA(n_components=config['PCA_COMPONENTS'], random_state=config['RANDOM_STATE'])
-        features_pca = pca.fit_transform(features_scaled)
-        
-        # Save preprocessing objects
-        preprocessing = {
-            'selector': selector,
-            'scaler': scaler,
-            'pca': pca
+        Args:
+            config (dict): Model configuration parameters
+        """
+        default_config = {
+            'random_state': 42,
+            'test_size': 0.2,
+            'data_path': os.path.join('data', 'processed', 'features_with_flags.csv'),
+            'batch_size': 32,
+            'num_epochs': 50,
+            'learning_rate': 0.001,
+            'weight_decay': 1e-5,
+            'l1_lambda': 1e-5,
+            'feature_selection_k': 1000,
+            'pca_components': 300,
+            'n_splits': 5,
+            'patience': 10,
+            'class_weights': [1.0, 3.0],
+            'use_smote': True,
+            'smote_ratio': 0.8,
+            'n_trials': 20,
+            'n_models': 5
         }
         
-        return features_pca, preprocessing
-    else:
-        # Apply saved preprocessing steps
-        if preprocessing is None:
-            preprocessing = config.get('preprocessing')
-            if preprocessing is None:
-                raise ValueError("No preprocessing objects provided. Either fit_preprocessing must be True, preprocessing must be provided directly, or config must contain 'preprocessing' key.")
+        # Merge default config with provided config
+        if config:
+            default_config.update(config)
             
-        features_selected = preprocessing['selector'].transform(features)
-        features_scaled = preprocessing['scaler'].transform(features_selected)
-        features_pca = preprocessing['pca'].transform(features_scaled)
-        return features_pca, preprocessing
-
-def apply_smote(X_train, y_train, config):
-    """Apply SMOTE for oversampling minority classes"""
-    if config['USE_SMOTE']:
-        # Calculate target ratios for SMOTE
-        class_counts = Counter(y_train)
-        max_class_count = max(class_counts.values())
-        target_ratio = {
-            class_label: int(max_class_count * config['SMOTE_RATIO']) 
-            if count < max_class_count else count
-            for class_label, count in class_counts.items()
-        }
+        super().__init__('advanced_ensemble', default_config)
         
-        # Apply SMOTE
-        smote = SMOTE(sampling_strategy=target_ratio, random_state=config['RANDOM_STATE'])
-        X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+        # Initialize preprocessing components
+        self.scaler = StandardScaler()
+        self.feature_selector = SelectKBest(f_classif, k=self.config['feature_selection_k'])
+        self.pca = PCA(n_components=self.config['pca_components'], random_state=self.config['random_state'])
         
-        print(f"Before SMOTE: {Counter(y_train)}")
-        print(f"After SMOTE: {Counter(y_resampled)}")
+        # Set device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.models = []
+        self.best_params = None
         
-        return X_resampled, y_resampled
-    else:
-        return X_train, y_train
-
-def create_balanced_sampler(labels, alpha=0.9):
-    """Create a partially balanced sampler with alpha controlling the balance degree"""
-    # Calculate class weights for balanced sampling
-    class_counts = np.bincount(labels)
-    n_samples = len(labels)
-    
-    # Calculate weights for each sample
-    weights = np.ones_like(labels, dtype=np.float64)
-    
-    # Blend between natural distribution (alpha=0) and equal distribution (alpha=1)
-    for class_idx in range(len(class_counts)):
-        natural_weight = n_samples / class_counts[class_idx] if class_counts[class_idx] > 0 else 0
-        equal_weight = len(class_counts)  # All classes equally likely
-        blended_weight = (1 - alpha) * 1.0 + alpha * natural_weight
-        weights[labels == class_idx] = blended_weight
-    
-    # Create and return sampler
-    return WeightedRandomSampler(weights, len(weights), replacement=True)
-
-def objective(trial, X_train, y_train, X_val, y_val, input_size, config):
-    """Objective function for Optuna hyperparameter optimization"""
-    # Define hyperparameters to optimize
-    hidden_size1 = trial.suggest_int('hidden_size1', 64, 512)
-    hidden_size2 = trial.suggest_int('hidden_size2', 32, 256)
-    dropout_rate = trial.suggest_float('dropout_rate', 0.2, 0.5)
-    learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
-    weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-4, log=True)
-    l1_lambda = trial.suggest_float('l1_lambda', 1e-6, 1e-4, log=True)
-    
-    # Create model with suggested hyperparameters
-    model = MalnutritionNN(
-        input_size=input_size,
-        hidden_sizes=[hidden_size1, hidden_size2, 1],
-        dropout_rate=dropout_rate
-    ).to(DEVICE)
-    
-    # Create dataset and data loader
-    train_dataset = MalnutritionDataset(X_train, y_train)
-    sampler = create_balanced_sampler(y_train, alpha=0.9)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['BATCH_SIZE'],
-        sampler=sampler
-    )
-    
-    # Define loss function with class weights
-    class_weights = torch.FloatTensor(config['CLASS_WEIGHTS']).to(DEVICE)
-    criterion = nn.BCELoss(weight=class_weights)
-    
-    # Define optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay
-    )
-    
-    # Train for a few epochs
-    model.train()
-    for epoch in range(10):  # Limited epochs for hyperparameter search
-        for features, labels in train_loader:
-            features, labels = features.to(DEVICE), labels.to(DEVICE)
+    def load_data(self):
+        """
+        Load and preprocess the data.
+        
+        Returns:
+            tuple: (X_train, X_test, y_train, y_test, class_distribution, X_train_processed, X_test_processed)
+        """
+        logging.info("Loading data...")
+        df = pd.read_csv(self.config['data_path'])
+        
+        # Create binary target variable
+        logging.info("Creating binary target variable...")
+        df['malnutrition_class'] = df.apply(
+            lambda row: 1 if row['sam'] == 1 or row['mam'] == 1 else 0,
+            axis=1
+        )
+        
+        # Get class distribution
+        class_distribution = df['malnutrition_class'].value_counts().sort_index()
+        logging.info(f"Class distribution:\n{class_distribution}")
+        
+        # Select features (ResNet50 features)
+        X = df.iloc[:, 1:2049].values  # ResNet50 features
+        
+        # Select target
+        y = df['malnutrition_class'].values
+        
+        # Split into train and test sets
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y,
+            test_size=self.config['test_size'],
+            random_state=self.config['random_state'],
+            stratify=y
+        )
+        
+        # Store original data
+        X_train_original = X_train.copy()
+        X_test_original = X_test.copy()
+        
+        # Preprocess features in the correct order
+        # 1. Scale features
+        X_train = self.scaler.fit_transform(X_train)
+        X_test = self.scaler.transform(X_test)
+        
+        # 2. Select features
+        X_train = self.feature_selector.fit_transform(X_train, y_train)
+        X_test = self.feature_selector.transform(X_test)
+        
+        # 3. Apply PCA
+        X_train = self.pca.fit_transform(X_train)
+        X_test = self.pca.transform(X_test)
+        
+        logging.info(f"Training set shape: {X_train.shape}")
+        logging.info(f"Test set shape: {X_test.shape}")
+        
+        return X_train_original, X_test_original, y_train, y_test, class_distribution, X_train, X_test
+        
+    def train(self):
+        """
+        Train the ensemble model.
+        
+        Returns:
+            tuple: (X_test_original, y_test) for evaluation
+        """
+        # Load data
+        X_train_original, X_test_original, y_train, y_test, class_distribution, X_train, X_test = self.load_data()
+        
+        # Apply SMOTE if enabled
+        if self.config['use_smote']:
+            smote = SMOTE(sampling_strategy=self.config['smote_ratio'], random_state=self.config['random_state'])
+            X_train, y_train = smote.fit_resample(X_train, y_train)
+            logging.info(f"After SMOTE - Training set shape: {X_train.shape}")
+        
+        # Create cross-validation folds
+        kf = StratifiedKFold(n_splits=self.config['n_splits'], shuffle=True, random_state=self.config['random_state'])
+        
+        # Initialize lists to store models and their parameters
+        self.models = []
+        fold_params = []
+        fold_scores = []
+        
+        # Train models for each fold
+        for fold, (train_idx, val_idx) in enumerate(kf.split(X_train, y_train)):
+            logging.info(f"\nTraining model for fold {fold+1}/{self.config['n_splits']}")
             
-            # Forward pass
-            outputs = model(features)
-            loss = criterion(outputs, labels)
+            # Split data for this fold
+            X_fold_train, y_fold_train = X_train[train_idx], y_train[train_idx]
+            X_fold_val, y_fold_val = X_train[val_idx], y_train[val_idx]
             
-            # Add L1 regularization
-            l1_reg = model.l1_regularization()
-            loss = loss + l1_lambda * l1_reg
+            # Hyperparameter optimization
+            study = optuna.create_study(direction='maximize')
+            study.optimize(
+                lambda trial: self._objective(trial, X_fold_train, y_fold_train, X_fold_val, y_fold_val),
+                n_trials=self.config['n_trials']
+            )
             
-            # Backward and optimize
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-    
-    # Evaluate on validation set
-    model.eval()
-    with torch.no_grad():
-        val_dataset = MalnutritionDataset(X_val, y_val)
-        val_loader = DataLoader(val_dataset, batch_size=config['BATCH_SIZE'])
-        val_preds = []
-        val_labels = []
+            # Get best hyperparameters
+            best_params = study.best_params
+            logging.info(f"Best hyperparameters for fold {fold+1}: {best_params}")
+            fold_params.append(best_params)
+            
+            # Train model with best hyperparameters
+            model = self._train_model(X_fold_train, y_fold_train, best_params)
+            self.models.append(model)
+            
+            # Evaluate on validation set
+            val_preds = self._predict_model(model, X_fold_val)
+            val_f1 = f1_score(y_fold_val, val_preds)
+            fold_scores.append(val_f1)
+            logging.info(f"Validation F1 score for fold {fold+1}: {val_f1:.4f}")
         
-        for features, labels in val_loader:
-            features, labels = features.to(DEVICE), labels.to(DEVICE)
-            outputs = model(features)
-            val_preds.extend(outputs.cpu().numpy().flatten())
-            val_labels.extend(labels.cpu().numpy())
+        # Store the best parameters from the fold with highest validation score
+        best_fold_idx = np.argmax(fold_scores)
+        self.best_params = fold_params[best_fold_idx]
+        logging.info(f"Best fold: {best_fold_idx + 1} with F1 score: {fold_scores[best_fold_idx]:.4f}")
+        logging.info(f"Using parameters from best fold: {self.best_params}")
         
-        # Calculate F1 score (macro)
-        f1 = f1_score(val_labels, val_preds, average='macro')
-    
-    return f1
-
-def train_and_evaluate_model(X_train, y_train, X_val, y_val, best_params, config):
-    """Train and evaluate a model with the given parameters"""
-    # Create model with best hyperparameters
-    model = MalnutritionNN(
-        input_size=X_train.shape[1],
-        hidden_sizes=[best_params['hidden_size1'], best_params['hidden_size2'], 1],
-        dropout_rate=best_params['dropout_rate']
-    ).to(DEVICE)
-    
-    # Create datasets and data loaders
-    train_dataset = MalnutritionDataset(X_train, y_train)
-    val_dataset = MalnutritionDataset(X_val, y_val)
-    
-    sampler = create_balanced_sampler(y_train, alpha=0.9)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['BATCH_SIZE'],
-        sampler=sampler
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['BATCH_SIZE']
-    )
-    
-    # Define loss function with class weights
-    class_weights = torch.FloatTensor(config['CLASS_WEIGHTS']).to(DEVICE)
-    criterion = nn.BCELoss(weight=class_weights)
-    
-    # Define optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=best_params['learning_rate'],
-        weight_decay=best_params['weight_decay']
-    )
-    
-    # Define learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='max',
-        factor=0.5,
-        patience=5,
-        verbose=True
-    )
-    
-    # Training loop
-    best_f1 = 0
-    best_model_state = None
-    patience_counter = 0
-    
-    for epoch in range(config['NUM_EPOCHS']):
-        # Training phase
+        # Set the best model as the main model for compatibility with base_model
+        self.model = self.models[best_fold_idx]
+        
+        return X_test_original, y_test
+        
+    def _objective(self, trial, X_train, y_train, X_val, y_val):
+        """Objective function for Optuna hyperparameter optimization."""
+        # Define hyperparameters to optimize
+        hidden_size1 = trial.suggest_int('hidden_size1', 64, 512)
+        hidden_size2 = trial.suggest_int('hidden_size2', 32, 256)
+        dropout_rate = trial.suggest_float('dropout_rate', 0.2, 0.5)
+        learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
+        weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-4, log=True)
+        l1_lambda = trial.suggest_float('l1_lambda', 1e-6, 1e-4, log=True)
+        
+        # Create model with suggested hyperparameters
+        model = MalnutritionNN(
+            input_size=X_train.shape[1],
+            hidden_sizes=[hidden_size1, hidden_size2, 1],
+            dropout_rate=dropout_rate
+        ).to(self.device)
+        
+        # Create dataset and data loader
+        train_dataset = MalnutritionDataset(X_train, y_train)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=True
+        )
+        
+        # Define loss function with class weights
+        pos_weight = torch.tensor([self.config['class_weights'][1] / self.config['class_weights'][0]]).to(self.device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        # Define optimizer
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay
+        )
+        
+        # Train for a few epochs
         model.train()
-        train_loss = 0.0
-        train_preds = []
-        train_labels = []
-        
-        for features, labels in train_loader:
-            features, labels = features.to(DEVICE), labels.to(DEVICE)
-            
-            # Forward pass
-            outputs = model(features)
-            loss = criterion(outputs, labels)
-            
-            # Add L1 regularization
-            l1_reg = model.l1_regularization()
-            loss = loss + best_params['l1_lambda'] * l1_reg
-            
-            # Backward and optimize
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            train_loss += loss.item()
-            
-            # Store predictions for metrics
-            train_preds.extend(outputs.cpu().numpy().flatten())
-            train_labels.extend(labels.cpu().numpy())
-        
-        # Calculate training metrics
-        train_acc = accuracy_score(train_labels, train_preds)
-        train_f1 = f1_score(train_labels, train_preds, average='macro')
-        train_f1_per_class = f1_score(train_labels, train_preds, average=None)
-        
-        # Validation phase
-        model.eval()
-        val_loss = 0.0
-        val_preds = []
-        val_labels = []
-        
-        with torch.no_grad():
-            for features, labels in val_loader:
-                features, labels = features.to(DEVICE), labels.to(DEVICE)
+        for epoch in range(10):  # Limited epochs for hyperparameter search
+            for features, labels in train_loader:
+                features, labels = features.to(self.device), labels.to(self.device)
                 
                 # Forward pass
                 outputs = model(features)
+                # Reshape labels to match output shape
+                labels = labels.float().unsqueeze(1)
                 loss = criterion(outputs, labels)
                 
-                val_loss += loss.item()
+                # Add L1 regularization
+                l1_reg = model.l1_regularization()
+                loss = loss + l1_lambda * l1_reg
                 
-                # Store predictions for metrics
-                val_preds.extend(outputs.cpu().numpy().flatten())
-                val_labels.extend(labels.cpu().numpy())
+                # Backward and optimize
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
         
-        # Calculate validation metrics
-        val_acc = accuracy_score(val_labels, val_preds)
-        val_f1 = f1_score(val_labels, val_preds, average='macro')
-        val_f1_per_class = f1_score(val_labels, val_preds, average=None)
-        
-        # Print metrics
-        print(f"Epoch {epoch+1}/{config['NUM_EPOCHS']}")
-        print(f"Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.4f}, Train F1: {train_f1:.4f}")
-        print(f"Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
-        print(f"Train F1 per class: {train_f1_per_class}")
-        print(f"Val F1 per class: {val_f1_per_class}")
-        print(f"Class distribution in predictions: {Counter(val_preds)}")
-        
-        # Update learning rate scheduler
-        scheduler.step(val_f1)
-        
-        # Early stopping
-        if val_f1 > best_f1:
-            best_f1 = val_f1
-            best_model_state = model.state_dict().copy()
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= config['PATIENCE']:
-                print(f"Early stopping after {epoch+1} epochs")
-                break
-    
-    # Load best model
-    model.load_state_dict(best_model_state)
-    
-    # Final evaluation
-    model.eval()
-    with torch.no_grad():
-        val_preds = []
-        val_probs = []
-        
-        for features, labels in val_loader:
-            features = features.to(DEVICE)
-            outputs = model(features)
-            val_preds.extend(outputs.cpu().numpy().flatten())
-            val_probs.extend(outputs.cpu().numpy())
-    
-    return model, val_preds, val_probs, best_f1
-
-def create_ensemble_model(X_train, y_train, X_val, y_val, X_test, y_test, config):
-    """Create and train an ensemble of models using cross-validation"""
-    # Get directories from main config
-    MODELS_DIR = os.path.join('meron2', 'modeling', 'models')
-    
-    results = {
-        'config': {k: v for k, v in config.items() if k != 'preprocessing'},  # Don't store preprocessing objects
-        'models': [],
-        'predictions': [],
-        'fold_scores': [],
-        'test_metrics': {}
-    }
-    
-    # Apply SMOTE for data augmentation on the training set
-    X_train_resampled, y_train_resampled = apply_smote(X_train, y_train, config)
-    
-    # Create cross-validation folds
-    kf = StratifiedKFold(n_splits=config['N_SPLITS'], shuffle=True, random_state=config['RANDOM_STATE'])
-    
-    fold_predictions = []
-    fold_probabilities = []
-    
-    for fold, (train_idx, val_idx) in enumerate(kf.split(X_train_resampled, y_train_resampled)):
-        print(f"\n*** Training model for fold {fold+1}/{config['N_SPLITS']} ***")
-        
-        # Split data for this fold
-        X_fold_train, y_fold_train = X_train_resampled[train_idx], y_train_resampled[train_idx]
-        X_fold_val, y_fold_val = X_train_resampled[val_idx], y_train_resampled[val_idx]
-        
-        # Hyperparameter optimization using Optuna
-        print(f"Running Bayesian hyperparameter optimization with {config['N_TRIALS']} trials...")
-        study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler())
-        study.optimize(
-            lambda trial: objective(trial, X_fold_train, y_fold_train, X_fold_val, y_fold_val, 
-                                  X_train.shape[1], config),
-            n_trials=config['N_TRIALS']
-        )
-        
-        # Get best hyperparameters
-        best_params = study.best_params
-        print(f"Best hyperparameters for fold {fold+1}: {best_params}")
-        
-        # Train model with best hyperparameters
-        model, val_preds, val_probs, val_f1 = train_and_evaluate_model(
-            X_fold_train, y_fold_train, X_fold_val, y_fold_val, best_params, config
-        )
-        
-        # Save model and results
-        model_filename = os.path.join(MODELS_DIR, f"ensemble_model_fold_{fold+1}.pth")
-        torch.save(model.state_dict(), model_filename)
-        print(f"Model saved to {model_filename}")
-        
-        # Store predictions on validation data
-        fold_predictions.append(val_preds)
-        fold_probabilities.append(val_probs)
-        
-        # Store fold score
-        results['fold_scores'].append(val_f1)
-        
-        # Store model info
-        results['models'].append({
-            'fold': fold + 1,
-            'hyperparameters': best_params,
-            'validation_f1': val_f1,
-            'model_file': model_filename
-        })
-        
-        print(f"Fold {fold+1} completed with validation F1 score: {val_f1:.4f}")
-
-    # Generate ensemble predictions for test set
-    all_test_predictions = []
-    all_test_probabilities = []
-    
-    for fold in range(config['N_SPLITS']):
-        # Load model
-        model = MalnutritionNN(
-            input_size=X_test.shape[1],
-            hidden_sizes=[
-                results['models'][fold]['hyperparameters']['hidden_size1'],
-                results['models'][fold]['hyperparameters']['hidden_size2'],
-                1
-            ],
-            dropout_rate=results['models'][fold]['hyperparameters']['dropout_rate']
-        ).to(DEVICE)
-        model.load_state_dict(torch.load(results['models'][fold]['model_file']))
-        
-        # Generate predictions
+        # Evaluate on validation set
         model.eval()
-        test_dataset = MalnutritionDataset(X_test, y_test)
-        test_loader = DataLoader(test_dataset, batch_size=config['BATCH_SIZE'])
-        test_preds = []
-        test_probs = []
-        
         with torch.no_grad():
-            for features, _ in test_loader:
-                features = features.to(DEVICE)
-                outputs = model(features)
-                test_preds.extend(outputs.cpu().numpy().flatten())
-                test_probs.extend(outputs.cpu().numpy())
+            val_preds = self._predict_model(model, X_val)
+            val_f1 = f1_score(y_val, val_preds)
         
-        all_test_predictions.append(test_preds)
-        all_test_probabilities.append(test_probs)
-    
-    # Ensemble predictions (soft voting)
-    ensemble_probabilities = np.mean(all_test_probabilities, axis=0)
-    ensemble_predictions = np.round(ensemble_probabilities)
-    
-    # Calculate ensemble metrics
-    test_acc = accuracy_score(y_test, ensemble_predictions)
-    test_f1_macro = f1_score(y_test, ensemble_predictions, average='macro')
-    test_f1_per_class = f1_score(y_test, ensemble_predictions, average=None)
-    
-    # Generate confusion matrix
-    cm = confusion_matrix(y_test, ensemble_predictions)
-    
-    # Save metrics
-    results['test_metrics'] = {
-        'accuracy': test_acc,
-        'f1_macro': test_f1_macro,
-        'f1_per_class': test_f1_per_class.tolist(),
-        'confusion_matrix': cm.tolist(),
-        'predictions_distribution': Counter(ensemble_predictions),
-        'ground_truth_distribution': Counter(y_test)
-    }
-    
-    # Generate classification report
-    report = classification_report(y_test, ensemble_predictions, zero_division=0)
-    print("\nEnsemble Classification Report:\n", report)
-    
-    # Print confusion matrix
-    print("\nEnsemble Confusion Matrix:")
-    print(cm)
-    
-    return results
+        return val_f1
+        
+    def _train_model(self, X_train, y_train, params):
+        """Train a single model with given parameters."""
+        # Create model
+        model = MalnutritionNN(
+            input_size=X_train.shape[1],
+            hidden_sizes=[params['hidden_size1'], params['hidden_size2'], 1],
+            dropout_rate=params['dropout_rate']
+        ).to(self.device)
+        
+        # Create dataset and data loader
+        train_dataset = MalnutritionDataset(X_train, y_train)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=True
+        )
+        
+        # Define loss function with class weights
+        pos_weight = torch.tensor([self.config['class_weights'][1] / self.config['class_weights'][0]]).to(self.device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        # Define optimizer
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=params['learning_rate'],
+            weight_decay=params['weight_decay']
+        )
+        
+        # Training loop
+        best_val_f1 = 0
+        patience_counter = 0
+        
+        for epoch in range(self.config['num_epochs']):
+            model.train()
+            train_loss = 0
+            
+            for features, labels in train_loader:
+                features, labels = features.to(self.device), labels.to(self.device)
+                
+                # Forward pass
+                outputs = model(features)
+                # Reshape labels to match output shape
+                labels = labels.float().unsqueeze(1)
+                loss = criterion(outputs, labels)
+                
+                # Add L1 regularization
+                l1_reg = model.l1_regularization()
+                loss = loss + params['l1_lambda'] * l1_reg
+                
+                # Backward and optimize
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += loss.item()
+            
+            # Early stopping
+            if patience_counter >= self.config['patience']:
+                break
+                
+            patience_counter += 1
+        
+        return model
+        
+    def _predict_model(self, model, X):
+        """Make predictions using a single model."""
+        model.eval()
+        with torch.no_grad():
+            X = torch.FloatTensor(X).to(self.device)
+            outputs = model(X)
+            # Apply sigmoid to get probabilities
+            probs = torch.sigmoid(outputs)
+            # Use a higher threshold for positive class due to imbalance
+            predictions = (probs > 0.6).float()
+            return predictions.cpu().numpy(), probs.cpu().numpy()
+        
+    def predict(self, X):
+        """
+        Make predictions using the ensemble.
+        
+        Args:
+            X: Features to predict on (raw data)
+            
+        Returns:
+            array: Predicted labels
+        """
+        if not self.models:
+            raise ValueError("Model must be trained before prediction")
+            
+        # Preprocess features in the correct order
+        X = self.scaler.transform(X)  # Scale first
+        X = self.feature_selector.transform(X)  # Then select features
+        X = self.pca.transform(X)  # Finally apply PCA
+        
+        # Get predictions from each model
+        predictions = []
+        probabilities = []
+        for model in self.models:
+            pred, prob = self._predict_model(model, X)
+            predictions.append(pred)
+            probabilities.append(prob)
+        
+        # Ensemble predictions (majority voting)
+        ensemble_pred = np.mean(predictions, axis=0) > 0.5
+        return ensemble_pred.astype(int)
+        
+    def predict_proba(self, X):
+        """
+        Make probability predictions using the ensemble.
+        
+        Args:
+            X: Features to predict on (raw data)
+            
+        Returns:
+            array: Predicted probabilities
+        """
+        if not self.models:
+            raise ValueError("Model must be trained before prediction")
+            
+        # Preprocess features in the correct order
+        X = self.scaler.transform(X)  # Scale first
+        X = self.feature_selector.transform(X)  # Then select features
+        X = self.pca.transform(X)  # Finally apply PCA
+        
+        # Get probabilities from each model
+        probabilities = []
+        for model in self.models:
+            model.eval()
+            with torch.no_grad():
+                X_tensor = torch.FloatTensor(X).to(self.device)
+                outputs = model(X_tensor)
+                probs = torch.sigmoid(outputs).cpu().numpy()
+                probabilities.append(probs)
+        
+        # Ensemble probabilities (average)
+        ensemble_prob = np.mean(probabilities, axis=0)
+        return ensemble_prob
+        
+    def save_model(self):
+        """Save the model and preprocessing components to disk."""
+        if not self.models:
+            raise ValueError("Model must be trained before saving")
+            
+        # Save models
+        for i, model in enumerate(self.models):
+            model_path = self.model_dir / f'model_{i+1}.pt'
+            torch.save(model.state_dict(), model_path)
+            logging.info(f"Model {i+1} saved to {model_path}")
+        
+        # Save preprocessing components
+        joblib.dump(self.scaler, self.model_dir / 'scaler.joblib')
+        joblib.dump(self.feature_selector, self.model_dir / 'feature_selector.joblib')
+        joblib.dump(self.pca, self.model_dir / 'pca.joblib')
+        
+        # Save best parameters
+        with open(self.model_dir / 'best_params.json', 'w') as f:
+            json.dump(self.best_params, f, indent=4)
+        
+        logging.info("Model components saved")
+        
+    def load_model(self, model_path):
+        """
+        Load the model and preprocessing components from disk.
+        
+        Args:
+            model_path (str): Path to the model directory
+        """
+        model_path = Path(model_path)
+        
+        # Load preprocessing components
+        self.scaler = joblib.load(model_path / 'scaler.joblib')
+        self.feature_selector = joblib.load(model_path / 'feature_selector.joblib')
+        self.pca = joblib.load(model_path / 'pca.joblib')
+        
+        # Load best parameters
+        with open(model_path / 'best_params.json', 'r') as f:
+            self.best_params = json.load(f)
+        
+        # Load models
+        self.models = []
+        for i in range(self.config['n_models']):
+            model = MalnutritionNN(
+                input_size=self.config['pca_components'],
+                hidden_sizes=[
+                    self.best_params['hidden_size1'],
+                    self.best_params['hidden_size2'],
+                    1
+                ],
+                dropout_rate=self.best_params['dropout_rate']
+            ).to(self.device)
+            model.load_state_dict(torch.load(model_path / f'model_{i+1}.pt'))
+            self.models.append(model)
+        
+        logging.info(f"Model and components loaded from {model_path}")
 
-def visualize_results(results):
-    """Visualize model results"""
-    # Get results directory
-    RESULTS_DIR = os.path.join('meron2', 'modeling', 'results')
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    
-    # Confusion Matrix
-    cm = np.array(results['test_metrics']['confusion_matrix'])
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['Normal', 'Malnourished'],
-                yticklabels=['Normal', 'Malnourished'])
-    plt.xlabel('Predicted')
-    plt.ylabel('Actual')
-    plt.title('Confusion Matrix')
-    plt.tight_layout()
-    cm_path = os.path.join(RESULTS_DIR, f'ensemble_confusion_matrix_{timestamp}.png')
-    plt.savefig(cm_path)
-    print(f"Confusion matrix saved to {cm_path}")
-    
-    # F1 Scores
-    plt.figure(figsize=(10, 6))
-    f1_scores = results['test_metrics']['f1_per_class']
-    bars = plt.bar(['Normal', 'Malnourished'], f1_scores)
-    plt.xlabel('Class')
-    plt.ylabel('F1 Score')
-    plt.title('F1 Score by Class')
-    plt.ylim(0, 1)
-    
-    # Add value annotations
-    for bar in bars:
-        height = bar.get_height()
-        plt.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                f'{height:.3f}', ha='center', va='bottom')
-    f1_path = os.path.join(RESULTS_DIR, f'ensemble_f1_scores_{timestamp}.png')
-    plt.savefig(f1_path)
-    plt.tight_layout()
-    print(f"F1 scores plot saved to {f1_path}")
-    
-    # Distribution of predictions
-    plt.figure(figsize=(10, 6))
-    pred_dist = results['test_metrics']['predictions_distribution']
-    plt.bar(['Normal', 'Malnourished'], 
-            [pred_dist.get(0, 0), pred_dist.get(1, 0)])
-    plt.xlabel('Class')
-    plt.ylabel('Count')
-    plt.title('Distribution of Predictions')
-    plt.tight_layout()
-    dist_path = os.path.join(RESULTS_DIR, f'ensemble_prediction_distribution_{timestamp}.png')
-    plt.savefig(dist_path)
-    print(f"Prediction distribution plot saved to {dist_path}")
-    
-    # Cross-validation F1 scores
-    plt.figure(figsize=(10, 6))
-    plt.plot(range(1, len(results['fold_scores'])+1), results['fold_scores'], marker='o')
-    plt.xlabel('Fold')
-    plt.ylabel('Validation F1 Score')
-    plt.title('Cross-Validation F1 Scores')
-    plt.grid(True)
-    plt.tight_layout()
-    cv_path = os.path.join(RESULTS_DIR, f'ensemble_cv_f1_scores_{timestamp}.png')
-    plt.savefig(cv_path)
-    print(f"Cross-validation F1 scores plot saved to {cv_path}")
-    
-    # Close all plots
-    plt.close('all')
-
-def save_results(results, filename=None):
-    """Save results to a JSON file"""
-    if filename is None:
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        filename = f"results_{timestamp}.json"
-    
-    with open(filename, 'w') as f:
-        json.dump(results, f, indent=4)
-    
-    print(f"Results saved to {filename}")
+    def evaluate(self, X_test, y_test):
+        """
+        Evaluate the model on test data.
+        
+        Args:
+            X_test: Test features
+            y_test: Test labels
+            
+        Returns:
+            dict: Dictionary containing evaluation metrics
+        """
+        logging.info("Evaluating model performance...")
+        results = super().evaluate(X_test, y_test)
+        
+        # Log key metrics
+        logging.info(f"Accuracy: {results['accuracy']:.4f}")
+        logging.info(f"F1 Score (Macro): {results['f1_macro']:.4f}")
+        logging.info(f"Precision (Macro): {results['precision_macro']:.4f}")
+        logging.info(f"Recall (Macro): {results['recall_macro']:.4f}")
+        
+        if results['roc_auc'] is not None:
+            logging.info(f"ROC AUC: {results['roc_auc']:.4f}")
+            logging.info("ROC curve data saved in metrics.json")
+        else:
+            logging.warning("ROC AUC could not be calculated")
+            
+        return results
+        
+    def visualize_results(self, results):
+        """
+        Visualize model results.
+        
+        Args:
+            results (dict): Dictionary containing evaluation metrics
+        """
+        logging.info("Visualizing model results...")
+        super().visualize_results(results)
+        logging.info(f"Results saved in {self.model_results_dir}")
 
 def main():
-    # Start timing
-    start_time = time.time()
+    """Main function to run the model training and evaluation pipeline."""
+    # Initialize model
+    model = AdvancedEnsembleModel()
     
-    # Setup directories for results
-    RESULTS_DIR = os.path.join('meron2', 'modeling', 'results')
-    MODELS_DIR = os.path.join('meron2', 'modeling', 'models')
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    os.makedirs(MODELS_DIR, exist_ok=True)
+    # Train model
+    X_test, y_test = model.train()
     
-    # Load data with same path as neural_network_model
-    DATA_PATH = os.path.join('data', 'processed', 'features_with_flags.csv')
-    print(f"Loading data from {DATA_PATH}")
+    # Save model
+    model.save_model()
     
-    # Load data
-    X, y = load_data(DATA_PATH, None)  # We don't need a separate labels path
-    
-    # Split data into train and test sets
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, 
-        test_size=CONFIG['TEST_SIZE'], 
-        random_state=CONFIG['RANDOM_STATE'],
-        stratify=y
-    )
-    
-    print(f"Training set: {X_train.shape}")
-    print(f"Test set: {X_test.shape}")
-    
-    # Apply feature selection and PCA for dimensionality reduction
-    print("Applying feature selection and dimensionality reduction...")
-    X_train_processed, preprocessing = preprocess_features(X_train, y_train, CONFIG)
-    X_test_processed, _ = preprocess_features(X_test, y_test, CONFIG, fit_preprocessing=False, preprocessing=preprocessing)
-    
-    print(f"Processed training set: {X_train_processed.shape}")
-    print(f"Processed test set: {X_test_processed.shape}")
-    
-    # Save preprocessing objects
-    preprocessing_path = os.path.join(MODELS_DIR, 'preprocessing_pipeline.joblib')
-    joblib.dump(preprocessing, preprocessing_path)
-    print(f"Preprocessing pipeline saved to {preprocessing_path}")
-    
-    # Update config with preprocessing objects
-    CONFIG['preprocessing'] = preprocessing
-    
-    # Create and train ensemble model
-    print("\n=== Training Ensemble Model ===")
-    results = create_ensemble_model(
-        X_train_processed, y_train,
-        X_train_processed, y_train,  # Using same data for validation in cross-validation
-        X_test_processed, y_test,
-        CONFIG
-    )
+    # Evaluate model
+    results = model.evaluate(X_test, y_test)
     
     # Visualize results
-    print("\n=== Visualizing Results ===")
-    visualize_results(results)
+    model.visualize_results(results)
     
-    # Save results
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    results_path = os.path.join(RESULTS_DIR, f'ensemble_results_{timestamp}.json')
-    save_results(results, results_path)
-    
-    # Calculate total time
-    total_time = time.time() - start_time
-    print(f"\nTotal execution time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
-    
-    # Print key metrics
-    print("\n=== Final Results ===")
-    print(f"Accuracy: {results['test_metrics']['accuracy']:.4f}")
-    print(f"Macro F1 Score: {results['test_metrics']['f1_macro']:.4f}")
-    print("F1 Scores by Class:")
-    for i, class_name in enumerate(['Normal', 'Malnourished']):
-        print(f"  {class_name}: {results['test_metrics']['f1_per_class'][i]:.4f}")
-
 if __name__ == "__main__":
     main() 
